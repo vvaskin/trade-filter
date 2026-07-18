@@ -62,12 +62,83 @@ def run_benchmark(
     }
 
 
+def build_mean_reversion_positions(
+    weekly_log_returns: pd.DataFrame,
+    gross_exposure: float = 10_000,
+    tau: float = 0.0,
+):
+    """
+    Build dollar-neutral mean-reversion positions.
+
+    A stock is eligible only when the absolute value of its
+    residual weekly return is at least tau.
+
+    Active weeks have:
+        long exposure  = +gross_exposure / 2
+        short exposure = -gross_exposure / 2
+
+    If no long or no short signals are available, the portfolio
+    holds cash for that week.
+    """
+    if tau < 0:
+        raise ValueError("tau must be non-negative.")
+
+    if gross_exposure <= 0:
+        raise ValueError("gross_exposure must be positive.")
+
+    # Calculate residuals
+    cluster_return = weekly_log_returns.mean(axis=1)
+    residuals = weekly_log_returns.sub(cluster_return, axis=0)
+
+    # Threshold residuals based on tau
+    eligible_residuals = residuals.where(
+        residuals.abs() >= tau,
+        0.0,
+    )
+
+    # Buy negative residuals and short positive residuals.
+    signals = -eligible_residuals
+
+    # Store long and short signal strengths as positive numbers.
+    long_scores = signals.clip(lower=0.0)
+    short_scores = (-signals).clip(lower=0.0)
+
+    long_total = long_scores.sum(axis=1)
+    short_total = short_scores.sum(axis=1)
+
+    # --- Ensuring dollar neutrality ---
+
+    # An active week is one where both long and short signals are available. Otherwise strategy holds cash.
+    active_week = long_total.gt(0) & short_total.gt(0)
+
+    # Allocate half of the gross exposure to each side.
+    long_positions = long_scores.div(
+        long_total.replace(0, np.nan),
+        axis=0,
+    ) * (gross_exposure / 2)
+
+    short_positions = -short_scores.div(
+        short_total.replace(0, np.nan),
+        axis=0,
+    ) * (gross_exposure / 2)
+
+    dollar_positions = (
+        long_positions + short_positions
+    ).fillna(0.0)
+
+    # Do not take a directional portfolio when one side is unavailable.
+    dollar_positions.loc[~active_week] = 0.0
+
+    return dollar_positions
+
+
 def run_backtest(
     prices: pd.DataFrame,
     start_date=None,
     end_date=None,
     I: float = 10_000,
     cost_bps: float = 10,
+    tau: float = 0.0,
     freq: str = "W-FRI",
     periods_per_year: int = 52,
 ):
@@ -78,12 +149,11 @@ def run_backtest(
         prices, start_date, end_date, freq
     )
 
-    # -- Algorithm based on the paper --
-    cluster_return = weekly_log_returns.mean(axis=1)
-    residuals = weekly_log_returns.sub(cluster_return, axis=0)
+    # -- Algorithm slightly modified from the paper --
 
-    gamma = I / residuals.abs().sum(axis=1)
-    dollar_positions = -residuals.mul(gamma, axis=0)
+    dollar_positions = build_mean_reversion_positions(
+        weekly_log_returns=weekly_log_returns, gross_exposure=I, tau=tau
+    )
 
     forward_returns = weekly_simple_returns.shift(-1)
     dollar_positions, forward_returns = dollar_positions.align(
