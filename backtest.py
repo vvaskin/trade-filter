@@ -62,6 +62,41 @@ def run_benchmark(
     }
 
 
+def make_dollar_neutral(
+    signed_scores: pd.DataFrame,
+    gross_exposure: float = 10_000,
+):
+    """
+    Scale a signed score matrix into dollar-neutral positions.
+
+    Positive scores become longs, negative scores become shorts. Each side is
+    scaled to gross_exposure / 2. A week with signals on only one side holds cash.
+    """
+    long_scores = signed_scores.clip(lower=0.0)
+    short_scores = (-signed_scores).clip(lower=0.0)
+
+    long_total = long_scores.sum(axis=1)
+    short_total = short_scores.sum(axis=1)
+
+    # An active week has both long and short signals; otherwise hold cash.
+    active_week = long_total.gt(0) & short_total.gt(0)
+
+    long_positions = long_scores.div(
+        long_total.replace(0, np.nan),
+        axis=0,
+    ) * (gross_exposure / 2)
+
+    short_positions = -short_scores.div(
+        short_total.replace(0, np.nan),
+        axis=0,
+    ) * (gross_exposure / 2)
+
+    dollar_positions = (long_positions + short_positions).fillna(0.0)
+    dollar_positions.loc[~active_week] = 0.0
+
+    return dollar_positions
+
+
 def build_mean_reversion_positions(
     weekly_log_returns: pd.DataFrame,
     gross_exposure: float = 10_000,
@@ -99,37 +134,7 @@ def build_mean_reversion_positions(
     # Buy negative residuals and short positive residuals.
     signals = -eligible_residuals
 
-    # Store long and short signal strengths as positive numbers.
-    long_scores = signals.clip(lower=0.0)
-    short_scores = (-signals).clip(lower=0.0)
-
-    long_total = long_scores.sum(axis=1)
-    short_total = short_scores.sum(axis=1)
-
-    # --- Ensuring dollar neutrality ---
-
-    # An active week is one where both long and short signals are available. Otherwise strategy holds cash.
-    active_week = long_total.gt(0) & short_total.gt(0)
-
-    # Allocate half of the gross exposure to each side.
-    long_positions = long_scores.div(
-        long_total.replace(0, np.nan),
-        axis=0,
-    ) * (gross_exposure / 2)
-
-    short_positions = -short_scores.div(
-        short_total.replace(0, np.nan),
-        axis=0,
-    ) * (gross_exposure / 2)
-
-    dollar_positions = (
-        long_positions + short_positions
-    ).fillna(0.0)
-
-    # Do not take a directional portfolio when one side is unavailable.
-    dollar_positions.loc[~active_week] = 0.0
-
-    return dollar_positions
+    return make_dollar_neutral(signals, gross_exposure)
 
 
 def run_backtest(
